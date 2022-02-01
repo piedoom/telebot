@@ -60,8 +60,8 @@ fn dictionary_worker() {
         if dirty_dictionary.swap(false, Ordering::Relaxed) {
             // The dictionary has been updated. We need to serialize both
             let dictionaries: [_; 2] = [
-                (&GAME_WORDS, assets_dir().join("custom_words.txt")),
-                (&DICT_WORDS, assets_dir().join("dictionary_words.txt")),
+                (&GAME_WORDS, assets_dir().join("words_custom.txt")),
+                (&DICT_WORDS, assets_dir().join("dictionary_custom.txt")),
             ];
             for (dict, file_path) in dictionaries {
                 let dict = dict.get().expect("dictionary not initialized");
@@ -119,9 +119,9 @@ fn load_dict_words() {
         btree.insert(line.expect("could not parse line"));
     }
 
-    GAME_WORDS
+    DICT_WORDS
         .set(RwLock::new(btree))
-        .expect("GAME_WORDS already initialized")
+        .expect("DICT_WORDS already initialized")
 }
 
 fn get_random_word() -> String {
