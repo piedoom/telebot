@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, LineWriter, Write};
 use std::path::{Path, PathBuf};
@@ -10,11 +10,8 @@ use std::{env, thread};
 use derive_more::From;
 use once_cell::sync::OnceCell;
 use rand::prelude::IteratorRandom;
-use teloxide::adaptors::auto_send::AutoRequest;
 use teloxide::macros::Transition;
-use teloxide::payloads::SendMessage;
 use teloxide::prelude::*;
-use teloxide::requests::JsonRequest;
 
 // We use a BTree to keep insertions/deletions cheap
 /// List of words that can be used by the game
@@ -59,6 +56,7 @@ fn dictionary_worker() {
     while !app_exiting.load(Ordering::Relaxed) {
         if dirty_dictionary.swap(false, Ordering::Relaxed) {
             // The dictionary has been updated. We need to serialize both
+            println!("Updating word lists");
             let dictionaries: [_; 2] = [
                 (&GAME_WORDS, assets_dir().join("words_custom.txt")),
                 (&DICT_WORDS, assets_dir().join("dictionary_custom.txt")),
@@ -183,13 +181,11 @@ pub enum DictionaryAction<'a> {
     Remove(&'a [&'a str]),
 }
 
-async fn edit_dictionary<'a>(
-    action: DictionaryAction<'a>,
-    cx: TransitionIn<AutoSend<Bot>>,
-) -> AutoRequest<JsonRequest<SendMessage>> {
+async fn edit_dictionary(action: DictionaryAction<'_>, cx: TransitionIn<AutoSend<Bot>>) {
+    //-> AutoRequest<JsonRequest<SendMessage>> {
     match action {
         DictionaryAction::Add(words) => {
-            let mut added_words = Vec::new();
+            let mut added_words = BTreeSet::new();
 
             let dictionaries: [_; 2] = [&GAME_WORDS, &DICT_WORDS];
             for dict in dictionaries {
@@ -197,16 +193,20 @@ async fn edit_dictionary<'a>(
                 let mut dict = dict.write().expect("could not lock dictionary");
 
                 for word in words {
+                    if word.len() != 5 {
+                        continue;
+                    }
+
                     if dict.insert(word.to_string()) {
-                        added_words.push(*word);
+                        added_words.insert(*word);
                     }
                 }
             }
 
-            cx.answer(format!("Added {:?}", added_words))
+            cx.answer(format!("Added {:?}", added_words)).await.ok();
         }
         DictionaryAction::Remove(words) => {
-            let mut removed_words = Vec::new();
+            let mut removed_words = BTreeSet::new();
 
             let dictionaries: [_; 2] = [&GAME_WORDS, &DICT_WORDS];
             for dict in dictionaries {
@@ -215,12 +215,12 @@ async fn edit_dictionary<'a>(
 
                 for word in words {
                     if dict.remove(*word) {
-                        removed_words.push(*word);
+                        removed_words.insert(*word);
                     }
                 }
             }
 
-            cx.answer(format!("Removed {:?}", removed_words))
+            cx.answer(format!("Removed {:?}", removed_words)).await.ok();
         }
     }
 }
@@ -234,6 +234,7 @@ async fn start_state(
     cx: TransitionIn<AutoSend<Bot>>,
     ans: String,
 ) -> TransitionOut<Dialogue> {
+    let input: Vec<String> = ans.split_whitespace().map(String::from).collect();
     match ans.as_str() {
         "/wordle" => {
             cx.answer("Wordle game started - /guess any 5 letter word")
@@ -241,30 +242,11 @@ async fn start_state(
             next(GuessState {
                 answer: get_random_word(),
                 guesses: Default::default(),
+                last_input: input,
             })
         }
         "/420" => {
             "heh";
-            next(state)
-        }
-        "/addword" => {
-            let ans: Vec<_> = ans.split_whitespace().collect();
-            if ans.len() < 2 {
-                cx.answer("Usage: /addword <WORD> [..WORD2]").await?;
-            } else {
-                edit_dictionary(DictionaryAction::Add(&ans[1..]), cx).await;
-            }
-
-            next(state)
-        }
-        "/removeword" => {
-            let ans: Vec<_> = ans.split_whitespace().collect();
-            if ans.len() < 2 {
-                cx.answer("Usage: /removeword <WORD> [..WORD2]").await?;
-            } else {
-                edit_dictionary(DictionaryAction::Remove(&ans[1..]), cx).await;
-            }
-
             next(state)
         }
         _ => next(state),
@@ -274,7 +256,9 @@ async fn start_state(
 #[derive(Clone)]
 pub struct GuessState {
     pub answer: String,
-    pub guesses: Vec<String>,
+    // Emoji representation as well as word guessed
+    pub guesses: Vec<(String, String)>,
+    pub last_input: Vec<String>,
 }
 
 #[teloxide(subtransition)]
@@ -283,28 +267,40 @@ async fn guess_state(
     cx: TransitionIn<AutoSend<Bot>>,
     ans: String,
 ) -> TransitionOut<Dialogue> {
-    let ans: Vec<&str> = ans.split_whitespace().collect();
-    match ans[0] {
-        "/addword" => {
-            if ans.len() < 2 {
-                cx.answer("Usage: /addword <WORD> [..WORD2]").await?;
+    let input: Vec<String> = ans.split_whitespace().map(String::from).collect();
+    let input_str: Vec<&str> = input.iter().map(String::as_str).collect();
+
+    let mut new_state = state.clone();
+    new_state.last_input = input.clone();
+
+    match new_state.last_input[0].as_str() {
+        "/addword" | "/addword@doomybot" => {
+            let wants_to_add_previous_guess = input.len() == 1 && state.last_input.len() == 2;
+
+            if wants_to_add_previous_guess {
+                edit_dictionary(DictionaryAction::Add(&[&state.last_input[1]]), cx).await;
             } else {
-                edit_dictionary(DictionaryAction::Add(&ans[1..]), cx).await;
+                edit_dictionary(DictionaryAction::Add(&input_str[1..]), cx).await;
             }
 
-            next(state)
+            next(new_state)
+        }
+        "/exit" | "/end" | "/stop" => {
+            let word = state.answer;
+            cx.answer(format!("Ending game. Word was {word}")).await?;
+            next(StartState)
         }
         "/removeword" => {
-            if ans.len() < 2 {
+            if input.len() < 2 {
                 cx.answer("Usage: /removeword <WORD> [..WORD2]").await?;
             } else {
-                edit_dictionary(DictionaryAction::Remove(&ans[1..]), cx).await;
+                edit_dictionary(DictionaryAction::Remove(&input_str[1..]), cx).await;
             }
 
-            next(state)
+            next(new_state)
         }
-        "/guess" if ans.len() == 2 => {
-            let attempt = ans[1];
+        "/guess" if input.len() == 2 => {
+            let attempt = input_str[1];
             let answer = &state.answer;
 
             let mut placement = [Placement::Missing; 5];
@@ -312,14 +308,14 @@ async fn guess_state(
             // return early if length of attempt is wrong amount of characters
             if attempt.chars().count() != 5 {
                 cx.answer("Guess was not 5 characters").await.ok();
-                return next(state);
+                return next(new_state);
             }
 
             if !is_dictionary_word(attempt) {
-                cx.answer(format!("{attempt} is not in the dictionary"))
+                cx.answer(format!("{attempt} is not in the dictionary. /addword?"))
                     .await
                     .ok();
-                return next(state);
+                return next(new_state);
             }
 
             let mut corrected_answer: Vec<char> = answer.clone().chars().collect();
@@ -347,14 +343,18 @@ async fn guess_state(
 
             // add to our guess history
             let mut guesses = state.guesses.clone();
-            guesses.push(result);
-            let guesses_string = guesses.join("\n");
+            guesses.push((result, attempt.to_string()));
+            let emoji_string = guesses
+                .iter()
+                .map(|(a, _)| a.clone())
+                .collect::<Vec<String>>()
+                .join("\n");
 
             let tries = guesses.len();
             // if we won...
             match placement == [Placement::Correct; 5] {
                 true => {
-                    cx.answer(format!("You won. {tries}/6\n{guesses_string}"))
+                    cx.answer(format!("You won. {tries}/6\n{emoji_string}"))
                         .await
                         .ok();
                     next(StartState)
@@ -363,16 +363,17 @@ async fn guess_state(
                     // check to see if we're out of guesses
                     let next_guess = tries + 1;
                     if next_guess < 7 {
-                        cx.answer(format!("{tries}/6\n{guesses_string}")).await.ok();
+                        cx.answer(format!("{tries}/6\n{emoji_string}")).await.ok();
                         next(GuessState {
                             answer: answer.to_string(),
                             guesses,
+                            last_input: input,
                         })
                     } else {
                         // lost
                         let answer = state.answer;
                         cx.answer(format!(
-                            "You lost. 6/6. Cringe.\nAnswer was {answer}\n{guesses_string}"
+                            "You lost. 6/6. Cringe.\nAnswer was {answer}\n{emoji_string}"
                         ))
                         .await
                         .ok();
