@@ -73,12 +73,15 @@ fn dictionary_worker() {
                     output_file
                         .write_all(word.as_bytes())
                         .expect("failed to write custom word");
+                    output_file
+                        .write_all("\n".as_bytes())
+                        .expect("failed to write newline");
                 }
             }
         }
 
         // Wait 5m
-        thread::sleep(Duration::from_secs(5 * 60));
+        thread::sleep(Duration::from_secs(2 * 60));
     }
 }
 
@@ -183,6 +186,7 @@ pub enum DictionaryAction<'a> {
 
 async fn edit_dictionary(action: DictionaryAction<'_>, cx: TransitionIn<AutoSend<Bot>>) {
     //-> AutoRequest<JsonRequest<SendMessage>> {
+    let dirty_dictionary = DIRTY_DICTIONARY.get().unwrap();
     match action {
         DictionaryAction::Add(words) => {
             let mut added_words = BTreeSet::new();
@@ -202,7 +206,7 @@ async fn edit_dictionary(action: DictionaryAction<'_>, cx: TransitionIn<AutoSend
                     }
                 }
             }
-
+            dirty_dictionary.store(true, Ordering::Relaxed);
             cx.answer(format!("Added {:?}", added_words)).await.ok();
         }
         DictionaryAction::Remove(words) => {
@@ -219,7 +223,7 @@ async fn edit_dictionary(action: DictionaryAction<'_>, cx: TransitionIn<AutoSend
                     }
                 }
             }
-
+            dirty_dictionary.store(true, Ordering::Relaxed);
             cx.answer(format!("Removed {:?}", removed_words)).await.ok();
         }
     }
